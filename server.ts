@@ -14,10 +14,18 @@ app.use(express.json());
 
 const SEARCHES_FILE = path.join(process.cwd(), "reparaciones_solicitadas.json");
 
+// In-memory store to prevent crashes on stateless, read-only filesystems like Vercel
+let memorySearches: any[] | null = null;
+let memoryConfig: any = null;
+
 // Helper to seed search history with professional entries if it doesn't exist
 async function initDatabase() {
+  if (memorySearches) {
+    return;
+  }
   try {
-    await fs.access(SEARCHES_FILE);
+    const data = await fs.readFile(SEARCHES_FILE, "utf-8");
+    memorySearches = JSON.parse(data);
   } catch {
     const seedData = [
       {
@@ -62,7 +70,7 @@ async function initDatabase() {
             { paso: "Drenado parcial de refrigerante y desmontaje de accesorios delanteros (bandas, soportes del motor)", duracionMin: 0.6, duracionMax: 0.9 },
             { paso: "Remoción de cubiertas plásticas de distribución para acceder a poleas y engranajes", duracionMin: 0.4, duracionMax: 0.6 },
             { paso: "Sincronización del motor (alineación estricta de marcas de tiempo PMS en cigüeñal y árbol de levas)", duracionMin: 0.5, duracionMax: 0.8 },
-            { paso: "Aflojado de tensor, desmontaje de correa vieja, rodillos guía y tensor", duracionMin: 0.4, duracionMax: 0.6 },
+            { paso: "Aflojado de tensor, desmontaje de correa vieja, rodillos guía and tensor", duracionMin: 0.4, duracionMax: 0.6 },
             { paso: "Instalación de kit nuevo (correa, poleas y tensor) ajustando a par de torque especificado", duracionMin: 0.6, duracionMax: 0.8 },
             { paso: "Giros manuales preventivos del cigüeñal (2 vueltas completas) para asegurar sincronía libre de colisión", duracionMin: 0.2, duracionMax: 0.3 },
             { paso: "Ensamblaje final de cubiertas, soportes de motor, bandas externas y recarga de refrigerante", duracionMin: 0.3, duracionMax: 0.5 }
@@ -104,7 +112,12 @@ async function initDatabase() {
         }
       }
     ];
-    await fs.writeFile(SEARCHES_FILE, JSON.stringify(seedData, null, 2), "utf-8");
+    try {
+      await fs.writeFile(SEARCHES_FILE, JSON.stringify(seedData, null, 2), "utf-8");
+    } catch {
+      console.warn("No se pudo escribir reparaciones_solicitadas.json (solo lectura en Vercel). Usando en memoria.");
+    }
+    memorySearches = seedData;
   }
 }
 
@@ -132,16 +145,25 @@ function getGeminiClient(): GoogleGenAI {
 const CONFIG_FILE = path.join(process.cwd(), "config_taller.json");
 
 async function loadConfig() {
+  if (memoryConfig) {
+    return memoryConfig;
+  }
   try {
     const data = await fs.readFile(CONFIG_FILE, "utf-8");
-    return JSON.parse(data);
+    memoryConfig = JSON.parse(data);
+    return memoryConfig;
   } catch {
     const defaultConfig = {
       appsScriptUrl: "",
       adminPasscode: "saaraguaca2"
     };
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2), "utf-8");
-    return defaultConfig;
+    try {
+      await fs.writeFile(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2), "utf-8");
+    } catch {
+      console.warn("No se pudo escribir config_taller.json (solo lectura en Vercel). Usando en memoria.");
+    }
+    memoryConfig = defaultConfig;
+    return memoryConfig;
   }
 }
 
@@ -186,7 +208,12 @@ app.post("/api/config-save", async (req, res) => {
   try {
     const config = await loadConfig();
     config.appsScriptUrl = (appsScriptUrl || "").trim();
-    await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    memoryConfig = config;
+    try {
+      await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    } catch {
+      console.warn("No se pudo escribir CONFIG_FILE (solo lectura en Vercel). Configuración persistida en memoria.");
+    }
     return res.json({ success: true, message: "¡Configuración guardada y enrutada de forma segura!" });
   } catch (err: any) {
     return res.status(500).json({ error: "No se pudo guardar la configuración: " + err.message });
@@ -198,9 +225,8 @@ app.get("/api/searches", async (req, res) => {
     await initDatabase();
     const appsScriptUrl = await getAppsScriptUrl();
 
-    // 1. Load local JSON searches first as baseline/fallback
-    const localData = await fs.readFile(SEARCHES_FILE, "utf-8");
-    let searches = JSON.parse(localData);
+    // 1. Load local JSON searches first as baseline/fallback from memory
+    let searches = memorySearches || [];
 
     // 2. If an Apps Script Web App URL is provided, fetch live rows directly from Google Sheets
     if (appsScriptUrl && appsScriptUrl.trim().startsWith("http")) {
@@ -268,9 +294,9 @@ app.get("/api/searches", async (req, res) => {
 app.post("/api/searches/reset", async (req, res) => {
   try {
     await fs.unlink(SEARCHES_FILE).catch(() => {});
+    memorySearches = null;
     await initDatabase();
-    const data = await fs.readFile(SEARCHES_FILE, "utf-8");
-    return res.json(JSON.parse(data));
+    return res.json(memorySearches || []);
   } catch (error: any) {
     return res.status(500).json({ error: "Error restableciendo: " + error.message });
   }
@@ -279,7 +305,12 @@ app.post("/api/searches/reset", async (req, res) => {
 // Clear ALL searches completely (writes empty array)
 app.post("/api/searches/clear", async (req, res) => {
   try {
-    await fs.writeFile(SEARCHES_FILE, "[]", "utf-8");
+    memorySearches = [];
+    try {
+      await fs.writeFile(SEARCHES_FILE, "[]", "utf-8");
+    } catch {
+      console.warn("No se pudo escribir el vaciado en disco (solo lectura). Reseteado en memoria.");
+    }
     return res.json([]);
   } catch (error: any) {
     return res.status(500).json({ error: "Error al borrar el historial: " + error.message });
@@ -291,13 +322,13 @@ app.delete("/api/searches/:id", async (req, res) => {
   try {
     const { id } = req.params;
     await initDatabase();
-    const localData = await fs.readFile(SEARCHES_FILE, "utf-8");
-    let searches = JSON.parse(localData);
-    
-    const filtered = searches.filter((s: any) => s.id !== id);
-    await fs.writeFile(SEARCHES_FILE, JSON.stringify(filtered, null, 2), "utf-8");
-    
-    return res.json({ success: true, filteredCount: filtered.length });
+    memorySearches = (memorySearches || []).filter((s: any) => s.id !== id);
+    try {
+      await fs.writeFile(SEARCHES_FILE, JSON.stringify(memorySearches, null, 2), "utf-8");
+    } catch {
+      console.warn("No se pudo eliminar en disco (solo lectura). Eliminado de memoria.");
+    }
+    return res.json({ success: true, filteredCount: (memorySearches || []).length });
   } catch (error: any) {
     return res.status(500).json({ error: "Error al eliminar registro: " + error.message });
   }
@@ -373,9 +404,8 @@ app.post("/api/searches", async (req, res) => {
 
     const geminiResult = JSON.parse(textOutput.trim());
 
-    // Load existing searches
-    const rawData = await fs.readFile(SEARCHES_FILE, "utf-8");
-    const searches = JSON.parse(rawData);
+    // Load existing searches from cache
+    const searches = memorySearches || [];
 
     // Create new search record
     interface SearchRecord {
@@ -442,7 +472,12 @@ app.post("/api/searches", async (req, res) => {
     // Prepend to show latest first ONLY if authorized/shouldSaveLocal is true
     if (shouldSaveLocal) {
       searches.unshift(newSearch);
-      await fs.writeFile(SEARCHES_FILE, JSON.stringify(searches, null, 2), "utf-8");
+      memorySearches = searches;
+      try {
+        await fs.writeFile(SEARCHES_FILE, JSON.stringify(searches, null, 2), "utf-8");
+      } catch {
+        console.warn("No se pudo escribir reparaciones_solicitadas.json (solo lectura en Vercel). Conservando en memoria.");
+      }
     }
 
     return res.json(newSearch);
