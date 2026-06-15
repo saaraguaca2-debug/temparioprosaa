@@ -1,0 +1,6 @@
+{
+  "name": "Tempario de Reparaciones Automotrices",
+  "description": "Una aplicación inteligente e intuitiva para teléfonos móviles que estima los tiempos de reparaciones automotrices con IA y registra las consultas y respuestas en Google Sheets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
